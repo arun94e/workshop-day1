@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const store = require('./store');
+const { version } = require('../package.json');
 
 const app = express();
 app.use(express.json());
@@ -13,12 +14,26 @@ function isValidDate(s) {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
 }
 
+// "2026-09-05", "2026/09/05", "2026-9-5", "2026/9/5" -> "2026-09-05"; anything else -> null
+function normalizeDate(s) {
+  const m = typeof s === 'string' && /^(\d{4})([-/])(\d{1,2})\2(\d{1,2})$/.exec(s);
+  if (!m) return null;
+  const iso = `${m[1]}-${m[3].padStart(2, '0')}-${m[4].padStart(2, '0')}`;
+  return isValidDate(iso) ? iso : null;
+}
+
+// Quote a CSV field if it holds a comma, double quote or newline; double any quotes inside
+function csvField(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
 function isValidMonth(s) {
   return typeof s === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(s);
 }
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: require('../package.json').version });
+  res.json({ status: 'ok', version });
 });
 
 // GET /expenses?from=YYYY-MM-DD&to=YYYY-MM-DD&category=food  (all optional, range inclusive)
@@ -64,6 +79,23 @@ app.post('/expenses', (req, res) => {
     note: typeof body.note === 'string' ? body.note : '',
   });
   res.status(201).json(row);
+});
+
+// GET /expenses/export.csv?from=YYYY-MM-DD&to=YYYY-MM-DD  (both required, range inclusive; also YYYY/MM/DD, zeros optional)
+app.get('/expenses/export.csv', (req, res) => {
+  const from = normalizeDate(req.query.from);
+  const to = normalizeDate(req.query.to);
+  if (!from) return res.status(400).json({ error: 'from must be YYYY-MM-DD or YYYY/MM/DD' });
+  if (!to) return res.status(400).json({ error: 'to must be YYYY-MM-DD or YYYY/MM/DD' });
+  if (from > to) return res.status(400).json({ error: 'from must not be after to' });
+  const rows = store
+    .readAll()
+    .filter((r) => r.date >= from && r.date <= to)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const lines = ['date,category,amount,note', ...rows.map((r) => [r.date, csvField(r.category), r.amount, csvField(r.note)].join(','))];
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="expenses-${from}-${to}.csv"`);
+  res.send(lines.join('\n') + '\n');
 });
 
 // --- routes end ---
